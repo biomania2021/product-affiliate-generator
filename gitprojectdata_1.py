@@ -9,11 +9,12 @@ import re
 import hashlib
 import requests
 import mysql.connector
-import os
 import glob
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
+import os
+from dotenv import load_dotenv
 
 # ChromeOptionsを設定
 options = Options()
@@ -26,10 +27,39 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import io
 
+import logging
+
+# --- ロギング設定 ---
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[
+                        logging.FileHandler("program.log"), # ファイルに出力
+                        logging.StreamHandler() # コンソールにも出力
+                    ])
+
+# --- 設定ここから ---
+# スクレイピング対象のベースURL（{page_number} の部分でページ番号を差し込む）
+TARGET_URL_FORMAT = "https://example.com/products?page={page_number}" 
+
+# 物体検出モデルのファイルパス
+YOLO_MODEL_PATH = "best.pt"  # 実際のファイル名を指定
+
+# スクレイピングするページ数
+MAX_PAGES_TO_SCRAPE = 5
+
+# HTML出力ファイル名
+OUTPUT_HTML_FILE = "新製品アフィリエイトリンク.txt"
+
+# スクレイピング用のCSSセレクタ
+THUMBNAIL_SELECTOR = 'img.product-thumbnail'  # 例: '適宜セレクタを追加'を具体的なものに
+PRODUCT_NAME_SELECTOR = 'div.product-name'   # 例: '適宜セレクタを追加'を具体的なものに
+
+WAIT_FOR_ELEMENT_CLASS = 'search-result-g-item' # 例: 待機対象のクラス名
+# --- 設定ここまで ---
+
 # 環境設定
-from dotenv import load_dotenv
-import os
-load_dotenv()
+load_dotenv() # 呼び出しは一度だけでOK
+
 
 # --- パラメータ設定部分 ---
 DEBUG_MODE = False # Trueにすると画像が表示される、普段はFalse
@@ -54,17 +84,17 @@ def scrape_page_data(page_number):
     driver = None
     try:
         driver = webdriver.Chrome(options=options)
-        url = f'ECサイトの商品情報一覧ページ{page_number}' # page_numberにページ数を割り当ててクロールする
+        url = TARGET_URL_FORMAT.format(page_number=page_number)
         driver.get(url)
         
         # 要素が表示されるまで最大15秒待機
         WebDriverWait(driver,15).until(
-            EC.presence_of_element_located((By.CLASS_NAME,'クラス名'))
+            EC.presence_of_element_located((By.CLASS_NAME,WAIT_FOR_ELEMENT_CLASS))
         )
     
         # 1. サムネイル要素や名前要素などをまとめて取得
-        thumbnails = driver.find_elements(By.CSS_SELECTOR,'適宜セレクタを追加')
-        name_elements = driver.find_elements(By.CSS_SELECTOR, '適宜セレクタを追加')
+        thumbnails = driver.find_elements(By.CSS_SELECTOR,THUMBNAIL_SELECTOR)
+        name_elements = driver.find_elements(By.CSS_SELECTOR, PRODUCT_NAME_SELECTOR)
         
         # 2. 商品名リストを作成
         name_list = [elem.text for elem in name_elements]
@@ -85,7 +115,8 @@ def scrape_page_data(page_number):
                 item_id = href.split('/')[-1].split('.')[0]  # URLからID部分を抽出 (例: yp158288.html → yp158288)
                 ID_list.append(item_id)
             except Exception as e:
-                print(f"ページ {page_number} で商品IDまたは画像URLの取得に失敗しました: {e}")
+                logging.info("--- チェックポイントA1: scrape_page_data ---")
+                logging.error(f"ページ {page_number} で商品IDまたは画像URLの取得に失敗しました: {e}", exc_info=True)
                 ID_list.append("N/A")
                 Image_urls.append("N/A")
 
@@ -98,7 +129,8 @@ def scrape_page_data(page_number):
         
     
     except Exception as e:
-        print(f"ページ {page_number} の処理中にエラー: {e}")
+        logging.info("--- チェックポイントA2: scrape_page_data ---")
+        logging.error(f"ページ {page_number} の処理中にエラー: {e}", exc_info=True)
         return []
 
     finally:
@@ -125,7 +157,7 @@ def process_and_filter_product(product_data, model):
 
     else:
         image_data = None
-        image_hash = 'download_failded'
+        image_hash = 'download_failed'
 
     product_key = hashlib.sha256((name + item_id).encode()).hexdigest()
 
@@ -141,14 +173,17 @@ def process_and_filter_product(product_data, model):
                 is_target_detected = True
     
         except Exception as e:
-            print(f"物体検出エラー：{item_id}, {e}")
+            logging.info("--- チェックポイントB1: process_and_filter_product ---")
+            logging.error(f"物体検出エラー：{item_id}", exc_info=True)
     # 結果を返す 
     if  is_target_detected:
-        print(f"採用:{name}")
+        logging.info("--- チェックポイントB2: process_and_filter_product ---")
+        logging.info(f"採用:{name}")
         return (product_key, name, item_id, image_url, image_hash)
     
     else:
-        print(f" スルー: {name}")
+        logging.info("--- チェックポイントB3: process_and_filter_product ---")
+        logging.info(f" スルー: {name}")
         return None
 
 def update_database(accepted_products, c):
@@ -197,61 +232,56 @@ def main():
     # ... 準備（DB接続、モデル読み込み）
     try:
         print("--- チェックポイント1: main関数開始 ---")
-
+        logging.info("--- チェックポイント1: main関数開始 ---")
         
         # データベース接続
         # 別に.envファイルを作成:
-        # .gitignoreファイルに.envを追加して、GitHubにアップロードされないようにする
+
+        # データベース接続
         conn = mysql.connector.connect(
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        database=os.getenv("DB_NAME"),
-        charset='utf8mb4'
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            host=os.getenv("DB_HOST"),
+            database=os.getenv("DB_DATABASE"),
+            charset=os.getenv("DB_CHARSET")
         )
         c = conn.cursor()
 
         # 物体検出用データ読み込み
-        # ステップ1：学習させたカスタムモデルのパスを指定
-        model_path = 'best.pt' # モデルは事前に準備必要 Roboflowなどで準備
-        # ステップ2：モデルを読み込む
-        model = YOLO(model_path)
+        # 設定した定数を使ってモデルを読み込む
+        model = YOLO(YOLO_MODEL_PATH)
         
         # updateテーブルを最初に空にする
         c.execute("TRUNCATE TABLE `update`")
-        print("--- チェックポイント2: updateテーブルのクリア完了 ---")
-    
+        logging.info("--- チェックポイント2: updateテーブルのクリア完了 ---")
         
         # --- メイン処理 ---
         accepted_products = []
-        for page_num in range(0, 5):
+        for page_num in range(0,MAX_PAGES_TO_SCRAPE + 1):
             raw_products = scrape_page_data(page_num)
             
             for product in raw_products:
                 filtered_result = process_and_filter_product(product, model)
                 if filtered_result: # 結果がNoneでなければ（採用されたら）
                     accepted_products.append(filtered_result)
-            print(f"--- チェックポイント3: AIフィルタリング完了、採用数: {len(accepted_products)} ---")
-            
+            logging.info(f"--- チェックポイント3:AIフィルタリング完了、採用数: {len(accepted_products)} ---")
                  
         # --- 3. データベース操作 ---
         update_database(accepted_products, c)
-        print("--- チェックポイント4: データベース更新処理完了 ---")
-        
+        logging.info(f"--- チェックポイント4: データベース更新処理完了 、採用数: {len(accepted_products)} ---")
         # --- 4. DB変更を【最後に一度だけ】確定 ---
         conn.commit()
-        print("--- チェックポイント5: コミット完了 ---")
-                         
+        logging.info("--- チェックポイント5: コミット完了 ---")
         # Mysqlで取得した新規データを出力する
         rows = []
-        c.execute('SELECT * FROM `digiY_f_p_update_detect2`')
+        c.execute('SELECT * FROM `update`')
         for row in c.fetchall():
             rows.append(row)
 
-        print("\n--- HTML生成用のデータチェック ---")
-        print(f"取得したレコード数: {len(rows)}")
+        logging.info("\n--- HTML生成用のデータチェック ---")
+        logging.info(f"取得したレコード数: {len(rows)}")
         if len(rows) > 0:
-            print("最初のレコード:", rows[0])
+            logging.info(f"最初のレコード:, {rows[0]}")
         
         # 画像リンクとアフィリエイトリンク作成
         degiy_link = '<a href="個々のアフィリエイトリンクURLP1P2</a>'
@@ -285,20 +315,19 @@ def main():
         
         # 全体のHTML
         html_Y = f'<br>(ECサイト名)<br>{image_html}<br>{text_html}<br>'
-        with open('新製品アフィリエイトリンク.txt', 'w') as f:
+        with open(OUTPUT_HTML_FILE, 'w') as f:
             f.write(html_Y)
-        print("--- チェックポイント6: HTML生成完了 ---")
-        
+        logging.info("--- チェックポイント6: HTML生成完了 ---")
         # MySQLデータベースとの接続を閉じる
         conn.commit()
         conn.close()
 
     except Exception as e:
-        print(f"メイン処理でエラーが発生しました: {e}")
+        logging.error(f"メイン処理でエラーが発生しました: {e}")
 
     finally:
         # ... 後片付け ...
-        print("終了")
+        logging.info("終了")
 
             
 if __name__ == "__main__":

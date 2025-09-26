@@ -1,0 +1,12 @@
+# Environment variables
+.env
+
+# Log files
+*.log
+
+# Screenshots and page sources
+*.png
+*.html
+
+# Python cache
+__pycache__/
